@@ -3,7 +3,9 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "typecheck": "tsc --noEmit",
     "lint": "eslint .",
@@ -11,6 +13,7 @@
   },
   "devDependencies": {
     "@eslint/js": "^9.0.0",
+    "ajv": "^8.20.0",
     "eslint": "^9.0.0",
     "typescript": "^5.6.0",
     "typescript-eslint": "^8.0.0",

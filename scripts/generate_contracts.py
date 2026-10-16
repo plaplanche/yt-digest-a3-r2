@@ -1,0 +1,151 @@
+"""Generates TypeScript types and Pydantic models from contracts/*.schema.json.
+
+Usage: generate_contracts.py <typescript-out-dir> <python-out-dir>
+Run through scripts/contracts.sh, which also formats the Python output.
+Supports the schema subset the contracts use: flat objects of string / integer / number /
+boolean / array-of-string / object properties, nullable types, enums, pattern, minimum, maximum.
+"""
+
+import json
+import re
+import sys
+from pathlib import Path
+from typing import Any
+
+ROOT = Path(__file__).resolve().parent.parent
+Schema = dict[str, Any]
+
+
+def pascal(name: str) -> str:
+    return "".join(p.capitalize() for p in re.split(r"[^A-Za-z0-9]+", name) if p)
+
+
+def member(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9]+", "_", value).upper()
+
+
+def types_of(prop: Schema) -> tuple[str, bool]:
+    t = prop["type"]
+    kinds = t if isinstance(t, list) else [t]
+    nullable = "null" in kinds
+    base = [k for k in kinds if k != "null"]
+    assert len(base) == 1, f"unsupported type {t}"
+    return base[0], nullable
+
+
+def lit(value: str) -> str:
+    return json.dumps(value)
+
+
+def ts_file(name: str, schema: Schema, header: str) -> str:
+    out = [header, ""]
+    fields: list[str] = []
+    required = set(schema.get("required", []))
+    for key, prop in schema["properties"].items():
+        kind, nullable = types_of(prop)
+        if "enum" in prop:
+            enum_name = pascal(key)
+            values = [v for v in prop["enum"] if v is not None]
+            out.append(f"export type {enum_name} = {' | '.join(lit(v) for v in values)};")
+            out.append(f"export const {enum_name}Values: readonly {enum_name}[] = [")
+            out.extend(f"  {lit(v)}," for v in values)
+            out.append("];")
+            out.append("")
+            ts = enum_name
+        elif kind == "string":
+            ts = "string"
+        elif kind in ("integer", "number"):
+            ts = "number"
+        elif kind == "boolean":
+            ts = "boolean"
+        elif kind == "array":
+            assert prop["items"]["type"] == "string"
+            ts = "string[]"
+        elif kind == "object":
+            ts = "Record<string, unknown>"
+        else:
+            raise AssertionError(f"unsupported type {kind}")
+        if nullable:
+            ts += " | null"
+        opt = "" if key in required else "?"
+        fields.append(f"  {key}{opt}: {ts};")
+    out.append(f"export interface {name} {{")
+    out.extend(fields)
+    out.append("}")
+    return "\n".join(out) + "\n"
+
+
+def py_file(name: str, schema: Schema, header: str) -> str:
+    uses_any = any(types_of(p)[0] == "object" for p in schema["properties"].values())
+    out = [header, "", "from enum import StrEnum"]
+    out += ["from typing import Any"] if uses_any else []
+    out += ["", "from pydantic import BaseModel, ConfigDict, Field", ""]
+    enums: list[str] = []
+    fields: list[str] = []
+    required = set(schema.get("required", []))
+    for key, prop in schema["properties"].items():
+        kind, nullable = types_of(prop)
+        args: list[str] = []
+        if "enum" in prop:
+            enum_name = pascal(key)
+            values = [v for v in prop["enum"] if v is not None]
+            enums.append(f"class {enum_name}(StrEnum):")
+            enums.extend(f"    {member(v)} = {lit(v)}" for v in values)
+            enums.append("")
+            py = enum_name
+        else:
+            args.append("strict=True")
+            if kind == "string":
+                py = "str"
+                if "pattern" in prop:
+                    args.append(f"pattern={lit(prop['pattern'])}")
+            elif kind == "integer":
+                py = "int"
+            elif kind == "number":
+                py = "float"
+            elif kind == "boolean":
+                py = "bool"
+            elif kind == "array":
+                assert prop["items"]["type"] == "string"
+                py = "list[str]"
+            elif kind == "object":
+                py = "dict[str, Any]"
+            else:
+                raise AssertionError(f"unsupported type {kind}")
+            if "minimum" in prop:
+                args.append(f"ge={prop['minimum']}")
+            if "maximum" in prop:
+                args.append(f"le={prop['maximum']}")
+        if nullable or key not in required:
+            py += " | None"
+        if key not in required:
+            args.insert(0, "default=None")
+        field = f"    {key}: {py}"
+        if args:
+            field += f" = Field({', '.join(args)})"
+        fields.append(field)
+    out.extend(["", *enums, f"class {name}(BaseModel):"])
+    out.append('    model_config = ConfigDict(extra="forbid")')
+    out.append("")
+    out.extend(fields)
+    return "\n".join(out) + "\n"
+
+
+def main() -> None:
+    ts_out, py_out = Path(sys.argv[1]), Path(sys.argv[2])
+    ts_out.mkdir(parents=True, exist_ok=True)
+    py_out.mkdir(parents=True, exist_ok=True)
+    note = "Generated by scripts/contracts.sh from contracts/{}. Do not edit by hand."
+    (py_out / "__init__.py").write_text("# Generated by scripts/contracts.sh. Do not edit by hand.\n")
+    for path in sorted((ROOT / "contracts").glob("*.schema.json")):
+        stem = path.name.removesuffix(".schema.json")
+        schema: Schema = json.loads(path.read_text())
+        text = note.format(path.name)
+        (ts_out / f"{stem}.ts").write_text(ts_file(schema["title"], schema, f"// {text}"))
+        (py_out / f"{stem.replace('-', '_')}.py").write_text(
+            py_file(schema["title"], schema, f"# {text}")
+        )
+
+
+if __name__ == "__main__":
+    main()
